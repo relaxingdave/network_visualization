@@ -6,6 +6,8 @@ r.id AS ride_id,
 r.line_id,
 s.from_id,
 s.to_id,
+from_st.cityname AS from_city,
+to_st.cityname AS to_city,
 from_st.gmap_params AS from_stop_geoc,
 to_st.gmap_params AS to_stop_geoc,
 capacity,
@@ -22,7 +24,8 @@ JOIN ext.stops from_st ON from_st.id = s.from_id
 JOIN ext.stops to_st ON to_st.id = s.to_id
 
 WHERE r.status = 'on_sale'
-AND departure BETWEEN '2020-01-01' AND '2020-10-01'
+AND r.capacity < 100 -- do not consider trains
+AND departure BETWEEN '2020-01-01' AND '2020-11-17'
 )
 
 SELECT rd.*,
@@ -32,6 +35,6 @@ JOIN ext.api_order_items oi
 	ON oi.from_id = rd.from_id AND oi.to_id = rd.to_id AND oi.ride_id = rd.ride_id
 AND oi.status = 'paid' AND oi.type IN ('adult', 'child')
 
-GROUP BY 1,2,3,4,5,6,7,8,9,10
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
 """
 

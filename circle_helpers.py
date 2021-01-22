@@ -5,6 +5,7 @@ import logging
 import matplotlib
 import numpy as np
 import os
+import config
 
 from sklearn.preprocessing import minmax_scale
 from PIL import Image, ImageDraw, ImageFont
@@ -14,6 +15,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(processName)s %(levelname)s %(name)s %(message)s',
 )
+
 
 # get dictionaries out of strings with ast and save coordinates
 def get_long_lat(rides):
@@ -28,14 +30,33 @@ def get_long_lat(rides):
 
     return rides
 
-def group_cap_per_hour(rides):
-    rides['dep_hour'] = [x.hour for x in rides.departure_time]
+
+def group_cap(
+        rides,
+        groupby_cols,
+):
+    """Group capacity by defined cols
+
+    :param rides: DataFrame to group
+    :param groupby_cols: list of grouping cols
+    :return: DataFrame
+    """
+
+    agg_dict = {
+        'from_lat': 'min',
+        'from_long': 'max',
+        'capacity': 'sum',
+        'num_buses': 'sum',
+        'passengers': 'sum',
+    }
+
     rides = rides.groupby(
-        ['from_id', 'from_lat', 'from_long', 'dep_hour'],
+        groupby_cols,
         as_index=False
-    ).sum()
+    ).agg(agg_dict)
 
     return rides
+
 
 def scale_color_column(df, color_column, limits=(0, 200)):
     # to query the color map, we need to scale the values
@@ -46,6 +67,22 @@ def scale_color_column(df, color_column, limits=(0, 200)):
         df[color_column], feature_range=limits
     )
     return df
+
+
+def get_color_from_colormap(cmap, value):
+    """Outputs a color hex value according to a number.
+
+    :param cmap: colormap
+    :param value: value to get color for
+    :return: hex color value
+    """
+
+    color_int = int(round(value))
+    rgb = cmap(color_int)[:3]
+    hex_color = matplotlib.colors.rgb2hex(rgb)
+
+    return hex_color
+
 
 # TODO pull out preprocessing steps like radius and color definition and save
 # them as columns in the dataframe to increase speed of generating maps.
@@ -59,6 +96,7 @@ def plot_color_circles(df, color_column, cmap, zoom_start=5, radius_scale=50):
     # draw circle for all rows
     # (since we grab every segment, this corresponds to segments)
     for index, row in df.iterrows():
+
         radius = row['capacity'] / radius_scale
 
         # query colormap with normalized values
@@ -73,8 +111,8 @@ def plot_color_circles(df, color_column, cmap, zoom_start=5, radius_scale=50):
             ),
             radius=radius,
             color=color_hex,
-            opacity=0.1,
-            fill_opacity=0.2,
+            opacity=0.2,
+            fill_opacity=0.3,
             fill=True
         )
 
@@ -106,46 +144,54 @@ def interpolate(
     return merged_df.replace(np.nan, 0)
 
 
-def get_cap_by_minute(float_hour, hour_grouped_cap):
+def get_interpolated_cap(float_unit, grouped_data):
     """get an interpolated dataframe for any time, based
     on hourly data"""
 
-    df1 = hour_grouped_cap.query(f"dep_hour=={int(float_hour)}")
+    time_unit = config.groupby_cols[1]
 
-    if float_hour < 23:
-        df2 = hour_grouped_cap.query(f"dep_hour=={int(float_hour) + 1}")
+    df1 = grouped_data.query(
+        f"{config.groupby_cols[1]}=={int(float_unit)}"
+    )
+
+    if (
+            (time_unit == 'dep_week' and float_unit < 52) or
+            (time_unit == 'dep_hour' and float_unit < 23)
+    ):
+        df2 = grouped_data.query(
+            f"{time_unit}=={int(float_unit) + 1}"
+        )
     else:
-        df2 = hour_grouped_cap.query(f"dep_hour=={int(0)}")
+        df2 = grouped_data.query(f"{time_unit}=={int(0)}")
 
-    columns = [
-        'from_lat', 'from_long', 'capacity', 'pax_per_cap_norm_scaled'
-    ]
+    columns = ['from_lat', 'from_long', 'capacity', 'pax_per_cap_norm_scaled']
 
     # add other columns
     df = interpolate(df1.loc[:, columns],
                      df2.loc[:, columns],
-                     float_hour)
+                     float_unit)
 
     return df
 
 
 def create_interpol_color_cap_frame(
         i,
-        df,
-        dep_hour,
+        grouped_data,
+        time_unit,
         color_column,
         cmap,
         zoom_start=5,
         radius_scale=50
 ):
-    float_hour_cap = get_cap_by_minute(dep_hour, df)
+    interpol_cap = get_interpolated_cap(time_unit, grouped_data)
 
     plot = plot_color_circles(
-        df=float_hour_cap,
+        df=interpol_cap,
         color_column=color_column,
         cmap=cmap,
         zoom_start=zoom_start,
-        radius_scale=radius_scale)
+        radius_scale=radius_scale
+    )
 
     # generate the png file as a byte array
     png = plot._to_png()
@@ -153,27 +199,37 @@ def create_interpol_color_cap_frame(
     image = Image.open(io.BytesIO(png))
     draw = ImageDraw.ImageDraw(image)
 
-    # now add a caption to the image to indicate the time-of-day.
-    hour = int(dep_hour)
-    minutes = int((dep_hour % 1) * 60)
-
     # load a font
     font = ImageFont.truetype("RobotoCondensed-Light.ttf", 30)
 
-    # draw time of day text
-    draw.text((20, image.height - 50),
-              "time: {:0>2}:{:0>2}h".format(hour, minutes),
-              fill=(255, 255, 255),
-              font=font)
+    if config.groupby_cols[1] == 'dep_hour':
+
+        # add a caption to the image to indicate the time-of-day.
+        hour = int(time_unit)
+        minutes = int((time_unit % 1) * 60)
+
+        # draw time of day text
+        draw.text((20, image.height - 50),
+                  "time: {:0>2}:{:0>2}h".format(hour, minutes),
+                  fill=(255, 255, 255),
+                  font=font)
+
+    elif config.groupby_cols[1] == 'dep_week':
+        # add a caption to the image to indicate the week of the year.
+        week = int(time_unit)
+
+        # draw time of day text
+        draw.text((20, image.height - 50),
+                  f"Week {week}",
+                  fill=(255, 255, 255),
+                  font=font)
 
     # draw title
-    draw.text((image.width - 400, 20),
-              "Offered Capacity per hour",
+    draw.text((image.width - 450, 20),
+              "Offered Capacity 2020",
               fill=(255, 255, 255),
               font=font)
-
 
     filename = os.path.join(
         "interpol_color_animation/frame_{:0>5}.png".format(i))
     image.save(filename, "PNG")
-
